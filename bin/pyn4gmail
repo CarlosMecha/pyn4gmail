@@ -1,0 +1,159 @@
+#!/usr/bin/python
+
+"""Performs client tasks for testing IMAP OAuth2 authentication.
+
+To use this script, you'll need to have registered with Google as an OAuth
+application and obtained an OAuth client ID and client secret.
+See http://code.google.com/apis/accounts/docs/OAuth2.html for instructions on
+registering and for documentation of the APIs invoked by this code.
+
+This script has 3 modes of operation.
+
+1. The first mode is used to generate and authorize an OAuth2 token, the
+first step in logging in via OAuth2.
+
+  pyn4gmail --user=xxx@gmail.com \
+    --client_id=1038[...].apps.googleusercontent.com \
+    --client_secret=VWFn8LIKAMC-MsjBMhJeOplZ \
+    --generate_oauth2_token
+
+The script will converse with Google and generate an oauth request
+token, then present you with a URL you should visit in your browser to
+authorize the token. Once you get the verification code from the Google
+website, enter it into the script to get your OAuth access token. The output
+from this command will contain the access token, a refresh token, and some
+metadata about the tokens. The access token can be used until it expires, and
+the refresh token lasts indefinitely, so you should record these values for
+reuse.
+
+2. The script will generate new access tokens using a refresh token.
+
+  pyn4gmail --user=xxx@gmail.com \
+    --client_id=1038[...].apps.googleusercontent.com \
+    --client_secret=VWFn8LIKAMC-MsjBMhJeOplZ \
+    --refresh_token=1/Yzm6MRy4q1xi7Dx2DuWXNgT6s37OrP_DW_IoyTum4YA
+
+3. Checks the number of unread emails in the INBOX folder for the user Gmail account.
+
+  pyn4gmail --user=xxx@gmail.com\
+    --access_token=ya29.AHES[...]x49qgsi2j8npW3kYg
+    --check
+  
+"""
+
+import imaplib
+from optparse import OptionParser
+import sys
+import signal
+import time
+
+sys.path.append('..') #Trick until I write the setup.py
+from pyn4gmail.checker.base import IMAPGmailChecker
+import pyn4gmail.oauth2.gmail as Gmail
+
+g_exit = False # I know I know!!
+
+def SetupOptionParser():
+  # Usage message is the module's docstring.
+  parser = OptionParser(usage=__doc__)
+  parser.add_option('--generate_oauth2_token',
+                    action='store_true',
+                    dest='generate_oauth2_token',
+                    help='generates an OAuth2 token for testing')
+  parser.add_option('--client_id',
+                    default=None,
+                    help='Client ID of the application that is authenticating. '
+                         'See OAuth2 documentation for details.')
+  parser.add_option('--client_secret',
+                    default=None,
+                    help='Client secret of the application that is '
+                         'authenticating. See OAuth2 documentation for '
+                         'details.')
+  parser.add_option('--access_token',
+                    default=None,
+                    help='OAuth2 access token')
+  parser.add_option('--refresh_token',
+                    default=None,
+                    help='OAuth2 refresh token')
+  parser.add_option('--scope',
+                    default='https://mail.google.com/',
+                    help='scope for the access token. Multiple scopes can be '
+                         'listed separated by spaces with the whole argument '
+                         'quoted.')
+  parser.add_option('--user',
+                    default=None,
+                    help='email address of user whose account is being '
+                         'accessed')
+  parser.add_option('--check',
+                    action='store_true',
+                    default=None,
+                    help='Checks the inbox folder looking for unread emails')
+  parser.add_option('--time',
+                    default=0,
+                    help='Sets the checks interval time in seconds. If is less '
+                         'or equal 5 or not defined it will check just once.')
+  return parser
+
+def RequireOptions(options, *args):
+  missing = [arg for arg in args if getattr(options, arg) is None]
+  if missing:
+    print 'Missing options: %s' % ' '.join(missing)
+    sys.exit(-1)
+
+
+def main(argv):
+  
+  global g_exit
+
+  options_parser = SetupOptionParser()
+  (options, args) = options_parser.parse_args()
+
+  def exit_gracefully(*args):
+    global g_exit
+    g_exit = True
+
+  if options.refresh_token:
+    RequireOptions(options, 'client_id', 'client_secret')
+    response = Gmail.refresh_token(options.client_id, options.client_secret,
+                            options.refresh_token)
+    print 'Access Token: %s' % response['access_token']
+    print 'Access Token Expiration Seconds: %s' % response['expires_in']
+  
+  elif options.generate_oauth2_token:
+    RequireOptions(options, 'client_id', 'client_secret')
+    print 'To authorize token, visit this url and follow the directions:'
+    print '  %s' % Gmail.generate_permission_url(options.client_id, options.scope)
+    authorization_code = raw_input('Enter verification code: ')
+    response = Gmail.authorize_tokens(options.client_id, options.client_secret,
+                                authorization_code)
+    print 'Refresh Token: %s' % response['refresh_token']
+    print 'Access Token: %s' % response['access_token']
+    print 'Access Token Expiration Seconds: %s' % response['expires_in']
+  
+  elif options.check:
+    RequireOptions(options, 'user', 'access_token')
+    checker = IMAPGmailChecker()
+    access_string = Gmail.generate_oauth2_string(options.user, options.access_token, base64_encode=False)
+    conf = {'user': options.user, 'access_string': access_string, 'clean': True}
+    checker.login(conf)
+    if (options.time > 5):
+      secs = float(options.time)
+      signal.signal(signal.SIGINT, exit_gracefully)
+      signal.signal(signal.SIGTERM, exit_gracefully)
+      while(not g_exit):
+        msgs = checker.check()
+        print len(msgs)
+        time.sleep(secs)
+    else:
+      msgs = checker.check()
+      print len(msgs)
+    checker.logout()
+  
+  else:
+    options_parser.print_help()
+    print 'Nothing to do, exiting.'
+    return
+
+
+if __name__ == '__main__':
+  main(sys.argv)
